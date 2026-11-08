@@ -30,7 +30,7 @@
     // モデルは上から順に試します。廃止された場合はここを書き換えてください。
     // 生徒にもAI新問を使わせる場合: Cloudflare WorkerのURLをここに設定します（例: 'https://chem-quiz.xxxx.workers.dev'）。
     // 空のままなら、従来どおり画面にAPIキーを入力する方式（先生用）になります。
-    const AI_PROXY_URL = '';
+    const AI_PROXY_URL = 'https://chem-quiz.masayuki8016.workers.dev';
     const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash'];
     const KEY_STORAGE = 'chem_quiz_gemini_key';
     const loadKey = () => { try { return localStorage.getItem(KEY_STORAGE) || ''; } catch (e) { return ''; } };
