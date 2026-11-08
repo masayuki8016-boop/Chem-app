@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>工業化学 反応式マスター</title>
+  <title>化学 反応式マスター</title>
 
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
@@ -28,6 +28,9 @@
     // --- AI設定 ---
     // APIキーはコードに埋め込まず、画面から入力（このブラウザにのみ保存）
     // モデルは上から順に試します。廃止された場合はここを書き換えてください。
+    // 生徒にもAI新問を使わせる場合: Cloudflare WorkerのURLをここに設定します（例: 'https://chem-quiz.xxxx.workers.dev'）。
+    // 空のままなら、従来どおり画面にAPIキーを入力する方式（先生用）になります。
+    const AI_PROXY_URL = '';
     const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash'];
     const KEY_STORAGE = 'chem_quiz_gemini_key';
     const loadKey = () => { try { return localStorage.getItem(KEY_STORAGE) || ''; } catch (e) { return ''; } };
@@ -35,7 +38,8 @@
 
     // --- 組み込み問題データ（各難易度30問） ---
     // 反応式は「係数+化学式」を ' + ' でつなぎ、'->' で左右に分けた文字列で管理します。
-    const QUIZ_LEN = 10; // 1回の出題数
+    const QUIZ_LEN = 10; // 1回の出題数（組み込み問題）
+    const AI_COUNT = 10; // AI新問で一度に作る問題数
     const RAW = {
       // [タイトル, 反応式, 解説]
       beginner: [
@@ -370,18 +374,19 @@
       const updateKey = (v) => { setApiKey(v); saveKey(v.trim()); };
 
       const generateAI = async (diff) => {
+        const useProxy = !!AI_PROXY_URL;
         const key = apiKey.trim();
-        if (!key) {
+        if (!useProxy && !key) {
           setAiError('AI新問を使うには、下の欄にGemini APIキーを入力してください。');
           return;
         }
         setAiError('');
         setIsLoading(true);
 
-        const diffLabel = { beginner: '初級（係数合わせのみ）', intermediate: '中級（係数＋化学式の選択）', advanced: '上級（工業的製法の反応式を自分で立式）' }[diff];
-        const prompt = `高校工業化学の化学反応式問題を3問作成してください。
+        const diffLabel = { beginner: '初級（係数合わせのみ）', intermediate: '中級（係数＋化学式の選択）', advanced: '上級（反応式を自分で立式。工業的製法を含む）' }[diff];
+        const prompt = `高校化学の化学反応式問題を${AI_COUNT}問作成してください。互いに異なる反応を選ぶこと。
 次のJSON配列のみを出力してください（マークダウン・コメント不要）。
-各反応式は必ず原子数が両辺で一致し、係数は最小の整数比にすること。化学式は H2O, Ca(OH)2 のように半角英数字で書くこと。左辺・右辺とも物質は最大3つまで。
+各反応式は必ず原子数が両辺で一致し、係数は最小の整数比にすること。化学式は H2O, Ca(OH)2 のように半角英数字で書くこと。左辺・右辺とも物質は最大4つまで。
 [
   {
     "title": "タイトル",
@@ -396,26 +401,39 @@
 難易度: ${diffLabel}`;
 
         let lastErr = '';
-        for (const model of GEMINI_MODELS) {
+        const attempts = useProxy ? ['proxy'] : GEMINI_MODELS;
+        for (const model of attempts) {
           try {
-            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-              body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: { responseMimeType: 'application/json' }
-              })
-            });
-            const data = await res.json();
-            if (!res.ok) {
-              lastErr = `${model}: ${data?.error?.message || res.status}`;
-              continue;
+            let text = '';
+            if (useProxy) {
+              const res = await fetch(AI_PROXY_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ diff, count: AI_COUNT })
+              });
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok) { lastErr = data?.error || `通信エラー(${res.status})`; continue; }
+              text = data.text || '';
+            } else {
+              const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+                body: JSON.stringify({
+                  contents: [{ parts: [{ text: prompt }] }],
+                  generationConfig: { responseMimeType: 'application/json' }
+                })
+              });
+              const data = await res.json();
+              if (!res.ok) {
+                lastErr = `${model}: ${data?.error?.message || res.status}`;
+                continue;
+              }
+              text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
             }
-            const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
             const match = text.match(/\[[\s\S]*\]/);
-            if (!match) { lastErr = `${model}: 応答がJSON配列ではありません`; continue; }
+            if (!match) { lastErr = '応答がJSON配列ではありません'; continue; }
             const qs = sanitizeAiQuestions(JSON.parse(match[0]), diff);
-            if (qs.length === 0) { lastErr = `${model}: 有効な問題がありませんでした`; continue; }
+            if (qs.length === 0) { lastErr = '有効な問題がありませんでした'; continue; }
             setDifficulty(diff);
             setQuestions(qs);
             setCurrentIndex(0);
@@ -424,7 +442,7 @@
             setScreen('playing');
             return;
           } catch (e) {
-            lastErr = `${model}: ${e.message}`;
+            lastErr = e.message;
           }
         }
         setIsLoading(false);
@@ -513,8 +531,8 @@
           <div className="flex-grow flex items-center justify-center p-4">
             <div className="bg-white rounded-2xl shadow-xl p-6 sm:p-8 max-w-md w-full text-center border-t-8 border-teal-500">
               <div className="text-teal-500 text-5xl mb-3"><i className="fa-solid fa-flask"></i></div>
-              <h1 className="text-2xl font-black text-slate-800 mb-2">工業化学 反応式マスター</h1>
-              <p className="text-slate-600 text-sm mb-6">化学反応式をマスターして工業化学の基礎固めをしよう！</p>
+              <h1 className="text-2xl font-black text-slate-800 mb-2">化学 反応式マスター</h1>
+              <p className="text-slate-600 text-sm mb-6">化学反応式をマスターして基礎固めをしよう！</p>
 
               {isLoading ? (
                 <div className="py-10 text-teal-600 font-bold animate-pulse">
@@ -539,7 +557,7 @@
                   </div>
 
                   <div className="p-3 bg-purple-50 border-2 border-purple-500 rounded-xl text-left">
-                    <div className="text-purple-700 font-bold">上級 (工業的反応の立式)</div>
+                    <div className="text-purple-700 font-bold">上級 (反応式の立式)</div>
                     <div className="flex gap-2 mt-2">
                       <button onClick={() => startQuiz('advanced')} className="flex-1 py-1.5 bg-purple-600 text-white font-bold rounded-lg text-sm">練習</button>
                       <button onClick={() => generateAI('advanced')} className="flex-1 py-1.5 bg-white text-purple-700 border border-purple-600 font-bold rounded-lg text-sm">✨AI新問</button>
@@ -552,6 +570,7 @@
                     </div>
                   )}
 
+                  {!AI_PROXY_URL && (
                   <details className="text-left text-xs text-slate-500 pt-1">
                     <summary className="cursor-pointer font-bold">AI新問の設定（Gemini APIキー）</summary>
                     <input
@@ -564,6 +583,7 @@
                     />
                     <p className="mt-1">キーはこのブラウザ内にだけ保存されます。「練習」ボタンはキー無しで使えます。</p>
                   </details>
+                  )}
                 </div>
               )}
             </div>
