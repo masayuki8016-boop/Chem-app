@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>工業化学 反応式マスター</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&display=swap" rel="stylesheet">
+
+  <style>
+    body { font-family: 'Noto Sans JP', sans-serif; background-color: #f0fdf4; }
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=number] { -moz-appearance: textfield; }
+  </style>
+</head>
+<body class="text-slate-800 antialiased min-h-screen flex flex-col">
+  <div id="root" class="flex-grow flex flex-col"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, Fragment } = React;
+
+    // --- AI設定 ---
+    // APIキーはコードに埋め込まず、画面から入力（このブラウザにのみ保存）
+    // モデルは上から順に試します。廃止された場合はここを書き換えてください。
+    const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+    const KEY_STORAGE = 'chem_quiz_gemini_key';
+    const loadKey = () => { try { return localStorage.getItem(KEY_STORAGE) || ''; } catch (e) { return ''; } };
+    const saveKey = (k) => { try { k ? localStorage.setItem(KEY_STORAGE, k) : localStorage.removeItem(KEY_STORAGE); } catch (e) {} };
+
+    // --- 組み込み問題データ（各難易度30問） ---
+    // 反応式は「係数+化学式」を ' + ' でつなぎ、'->' で左右に分けた文字列で管理します。
+    const QUIZ_LEN = 10; // 1回の出題数
+    const RAW = {
+      // [タイトル, 反応式, 解説]
+      beginner: [
+        ['プロパンの燃焼', 'C3H8 + 5O2 -> 3CO2 + 4H2O', 'Cは3つなのでCO₂を3、Hは8つなのでH₂Oを4。右辺のOが計10個になるので、O₂を5にします。'],
+        ['アルミニウムと塩酸', '2Al + 6HCl -> 2AlCl3 + 3H2', 'ClとHの数を合わせます。AlCl₃のCl(3個)とH₂のH(2個)の最小公倍数6に注目し、HClを6にします。'],
+        ['アンモニアの合成', 'N2 + 3H2 -> 2NH3', 'Nが2個なのでNH₃を2に。すると右辺のHが6個になるので、H₂を3にします。'],
+        ['メタンの燃焼', 'CH4 + 2O2 -> CO2 + 2H2O', 'Hが4個なのでH₂Oを2に。右辺のOが計4個になるので、O₂を2にします。'],
+        ['水の生成', '2H2 + O2 -> 2H2O', 'Oが左辺2個・右辺1個なのでH₂Oを2に。するとHが4個になるので、H₂を2にします。'],
+        ['マグネシウムの燃焼', '2Mg + O2 -> 2MgO', 'O₂のOが2個なのでMgOを2に。するとMgが2個になるので、Mgを2にします。'],
+        ['鉄の酸化', '4Fe + 3O2 -> 2Fe2O3', 'Fe₂O₃のFe(2個)とO(3個)に注目。Oの最小公倍数6からFe₂O₃を2、O₂を3、Feを4にします。'],
+        ['ナトリウムと水', '2Na + 2H2O -> 2NaOH + H2', 'H₂のHが2個なので、まずH₂Oを2にしてNaOHも2、Naも2にそろえます。'],
+        ['亜鉛と塩酸', 'Zn + 2HCl -> ZnCl2 + H2', 'Clが右辺に2個あるのでHClを2に。するとHが2個になり、H₂は1で合います。'],
+        ['塩素酸カリウムの熱分解', '2KClO3 -> 2KCl + 3O2', 'Oが左辺3個・右辺2個。最小公倍数6からKClO₃を2、O₂を3にし、KClを2にします。'],
+        ['過酸化水素の分解', '2H2O2 -> 2H2O + O2', 'Oが左辺2個・右辺に水1個とO₂。H₂O₂を2にするとH₂Oが2、O₂が1で合います。'],
+        ['エタンの燃焼', '2C2H6 + 7O2 -> 4CO2 + 6H2O', 'C₂H₆を1とすると係数が分数(7/2)になるので、全体を2倍して整数にします。'],
+        ['エチレンの燃焼', 'C2H4 + 3O2 -> 2CO2 + 2H2O', 'Cが2個でCO₂を2、Hが4個でH₂Oを2。Oが計6個になるのでO₂を3にします。'],
+        ['アセチレンの燃焼', '2C2H2 + 5O2 -> 4CO2 + 2H2O', 'C₂H₂を1とするとO₂が5/2になるので、全体を2倍して整数にします。'],
+        ['エタノールの燃焼', 'C2H5OH + 3O2 -> 2CO2 + 3H2O', 'Cが2個でCO₂を2、Hが6個でH₂Oを3。右辺のOが7個、エタノールのO(1個)を引いて残り6個なのでO₂を3にします。'],
+        ['石灰石と塩酸', 'CaCO3 + 2HCl -> CaCl2 + H2O + CO2', 'Clが右辺に2個あるのでHClを2に。Hは2個でH₂O 1個と合います。'],
+        ['アルミニウムと希硫酸', '2Al + 3H2SO4 -> Al2(SO4)3 + 3H2', 'SO₄が右辺に3個あるのでH₂SO₄を3に。Alは2個なのでAlを2、H₂は3になります。'],
+        ['酸化鉄(III)の一酸化炭素還元', 'Fe2O3 + 3CO -> 2Fe + 3CO2', 'Feが2個でFeを2。Oの数から、COを3、CO₂を3にすると合います。'],
+        ['水酸化ナトリウムと硫酸の中和', '2NaOH + H2SO4 -> Na2SO4 + 2H2O', 'Naが右辺に2個なのでNaOHを2に。Hが4個になるのでH₂Oを2にします。'],
+        ['水酸化カルシウムと塩酸の中和', 'Ca(OH)2 + 2HCl -> CaCl2 + 2H2O', 'Clが右辺に2個なのでHClを2に。Hが4個になるのでH₂Oを2にします。'],
+        ['アンモニアの触媒酸化', '4NH3 + 5O2 -> 4NO + 6H2O', 'Hが3と2の最小公倍数6からNH₃を2、H₂Oを3としてNを合わせ、整数にするため全体を2倍します。'],
+        ['一酸化窒素の酸化', '2NO + O2 -> 2NO2', 'O₂のOが2個なのでNO₂を2に。すると右辺のOが4個なので、NOを2にします。'],
+        ['二酸化窒素と水', '3NO2 + H2O -> 2HNO3 + NO', 'HからH₂Oを1に対しHNO₃を2。Nが3個必要なのでNO₂を3にし、Oを合わせます。'],
+        ['二酸化硫黄の酸化', '2SO2 + O2 -> 2SO3', 'Oが左辺で奇数になりやすいので、SO₃を2にしてSO₂を2、O₂を1にします。'],
+        ['炭酸水素ナトリウムの熱分解', '2NaHCO3 -> Na2CO3 + H2O + CO2', 'Naが右辺に2個なのでNaHCO₃を2に。H・C・Oの数も合います。'],
+        ['銅の酸化', '2Cu + O2 -> 2CuO', 'O₂のOが2個なのでCuOを2に。するとCuが2個になるので、Cuを2にします。'],
+        ['高温の鉄と水蒸気', '3Fe + 4H2O -> Fe3O4 + 4H2', 'Fe₃O₄のFeが3個なのでFeを3に。Oが4個なのでH₂Oを4にし、H₂も4にします。'],
+        ['アルコール発酵', 'C6H12O6 -> 2C2H5OH + 2CO2', 'Cが6個なので、C₂H₅OHを2、CO₂を2にすると、C・H・Oがすべて合います。'],
+        ['酸化アルミニウムの電気分解', '2Al2O3 -> 4Al + 3O2', 'Oが3個と2個の最小公倍数6からAl₂O₃を2、O₂を3にし、Alを4にします。'],
+        ['硫化水素の燃焼', '2H2S + 3O2 -> 2SO2 + 2H2O', 'Hが2個でH₂Sを2に。SO₂が2個、H₂Oが2個でOが計6個なので、O₂を3にします。']
+      ],
+      // [タイトル, 反応の説明, 反応式, 解説, ダミー選択肢]
+      intermediate: [
+        ['銅と熱濃硫酸', '銅に熱濃硫酸を作用させると、硫酸銅(II)と二酸化硫黄と水が生じます。', 'Cu + 2H2SO4 -> CuSO4 + SO2 + 2H2O', '濃硫酸は酸化剤としてはたらき、SO₂が発生します。Sは右辺で計3個になるのでH₂SO₄を2にし、H₂Oも2になります。', ['H2', 'CuO']],
+        ['石灰水の白濁', '石灰水に二酸化炭素を通じると、炭酸カルシウムの白色沈殿が生じます。', 'Ca(OH)2 + CO2 -> CaCO3 + H2O', '水酸化カルシウムに二酸化炭素を通すと、炭酸カルシウムと水が生成します。', ['CaO', 'H2CO3']],
+        ['エチレンの燃焼', 'エチレンを完全燃焼させると、二酸化炭素と水が生じます。', 'C2H4 + 3O2 -> 2CO2 + 2H2O', 'Cが2個でCO₂を2、Hが4個でH₂Oを2、Oを合わせてO₂は3になります。', ['H2', 'C']],
+        ['亜鉛と塩酸', '亜鉛に塩酸を加えると、塩化亜鉛と水素が生じます。', 'Zn + 2HCl -> ZnCl2 + H2', 'Znはイオン化傾向が水素より大きいので、塩酸から水素を発生させます。', ['ZnO', 'Cl2']],
+        ['ナトリウムと水', 'ナトリウムを水に入れると、水酸化ナトリウムと水素が生じます。', '2Na + 2H2O -> 2NaOH + H2', 'アルカリ金属は常温の水と激しく反応し、水素を発生します。', ['Na2O', 'O2']],
+        ['石灰石と塩酸', '石灰石（炭酸カルシウム）に塩酸を加えると、塩化カルシウム・水・二酸化炭素が生じます。', 'CaCO3 + 2HCl -> CaCl2 + H2O + CO2', '弱酸の塩に強酸を加えると、弱酸が遊離します（炭酸は水とCO₂に分解）。', ['CaO', 'H2']],
+        ['水酸化ナトリウムによる二酸化炭素の吸収', '水酸化ナトリウム水溶液に二酸化炭素を十分に吹き込むと、炭酸ナトリウムと水が生じます。', '2NaOH + CO2 -> Na2CO3 + H2O', 'CO₂は酸性酸化物なので強塩基と中和します。Naが2個なのでNaOHを2にします。', ['NaHCO3', 'NaCl']],
+        ['鉄と希硫酸', '鉄に希硫酸を加えると、硫酸鉄(II)と水素が生じます。', 'Fe + H2SO4 -> FeSO4 + H2', '希硫酸中ではFe²⁺が生じ、水素が発生します。', ['Fe2(SO4)3', 'SO2']],
+        ['過酸化水素の分解', '酸化マンガン(IV)を触媒として過酸化水素を分解すると、水と酸素が生じます。', '2H2O2 -> 2H2O + O2', 'Oが右辺でO₂の2個を含むので、H₂O₂は2が必要です。', ['H2', 'MnO2']],
+        ['アンモニアの実験室的製法', '塩化アンモニウムと水酸化カルシウムの混合物を加熱すると、塩化カルシウム・アンモニア・水が生じます。', '2NH4Cl + Ca(OH)2 -> CaCl2 + 2NH3 + 2H2O', 'Clが右辺に2個なのでNH₄Clを2に。すると、NH₃が2、H₂Oが2になります。', ['CaO', 'NH4OH', 'H2']],
+        ['一酸化窒素の酸化', '一酸化窒素が空気中の酸素と反応すると、二酸化窒素が生じます。', '2NO + O2 -> 2NO2', '無色のNOが空気に触れて赤褐色のNO₂になります。', ['N2O', 'N2']],
+        ['二酸化窒素と水', '二酸化窒素が温水と反応すると、硝酸と一酸化窒素が生じます。', '3NO2 + H2O -> 2HNO3 + NO', 'オストワルト法の第3段階にあたる反応です。NO₂は一部が酸化され、一部が還元されます。', ['HNO2', 'N2']],
+        ['銅と濃硝酸', '銅に濃硝酸を作用させると、硝酸銅(II)・二酸化窒素・水が生じます。', 'Cu + 4HNO3 -> Cu(NO3)2 + 2NO2 + 2H2O', '濃硝酸ではNO₂が発生します。Nが右辺で4個になるのでHNO₃を4にします。', ['NO', 'CuO']],
+        ['銅と希硝酸', '銅に希硝酸を作用させると、硝酸銅(II)・一酸化窒素・水が生じます。', '3Cu + 8HNO3 -> 3Cu(NO3)2 + 2NO + 4H2O', '希硝酸ではNOが発生します。電子の授受をそろえるため、Cuが3、NOが2になります。', ['NO2', 'H2']],
+        ['二酸化硫黄の酸化', '触媒を用いて二酸化硫黄を酸素と反応させると、三酸化硫黄が生じます。', '2SO2 + O2 -> 2SO3', '接触法の中心となる反応で、酸化バナジウム(V)が触媒です。', ['SO', 'H2SO4']],
+        ['三酸化硫黄と水', '三酸化硫黄を水と反応させると、硫酸が生じます。', 'SO3 + H2O -> H2SO4', '酸性酸化物が水と反応すると、対応する酸になります。', ['H2SO3', 'SO2']],
+        ['生石灰と水', '生石灰（酸化カルシウム）に水を加えると、水酸化カルシウムが生じます。', 'CaO + H2O -> Ca(OH)2', '大量の熱を発生する反応です。塩基性酸化物と水の反応です。', ['CaCO3', 'CaH2']],
+        ['エタノールの燃焼', 'エタノールを完全燃焼させると、二酸化炭素と水が生じます。', 'C2H5OH + 3O2 -> 2CO2 + 3H2O', 'Cが2個でCO₂を2、Hが6個でH₂Oを3、Oを合わせてO₂は3になります。', ['H2', 'CO']],
+        ['アセチレンの燃焼', 'アセチレンを完全燃焼させると、二酸化炭素と水が生じます。', '2C2H2 + 5O2 -> 4CO2 + 2H2O', 'Oの数を整数で合わせるため、全体を2倍にします。', ['H2', 'C']],
+        ['カーバイドと水', '炭化カルシウム（カーバイド）に水を加えると、水酸化カルシウムとアセチレンが生じます。', 'CaC2 + 2H2O -> Ca(OH)2 + C2H2', 'アセチレンの実験室的製法です。Hの数から、水は2になります。', ['CaO', 'C2H4']],
+        ['水の電気分解', '水を電気分解すると、水素と酸素が生じます。', '2H2O -> 2H2 + O2', 'Oが2個の酸素分子をつくるので、H₂Oは2が必要です。', ['H2O2', 'H3O']],
+        ['食塩水の電気分解', '食塩水を電気分解すると、水酸化ナトリウム・塩素・水素が生じます。', '2NaCl + 2H2O -> 2NaOH + Cl2 + H2', 'Cl₂のClが2個なのでNaClを2に。H₂Oも2になります。', ['Na', 'HCl']],
+        ['塩素の発生', '酸化マンガン(IV)に濃塩酸を加えて加熱すると、塩化マンガン(II)・水・塩素が生じます。', 'MnO2 + 4HCl -> MnCl2 + 2H2O + Cl2', 'Clが右辺で4個になるのでHClを4にします。Hが4個で、H₂Oは2です。', ['MnO', 'H2']],
+        ['酸化銅(II)の水素還元', '加熱した酸化銅(II)に水素を通すと、銅と水が生じます。', 'CuO + H2 -> Cu + H2O', '酸化銅は還元されて銅になり、水素は酸化されて水になります。', ['Cu2O', 'CuH']],
+        ['酸化銅(II)の炭素還元', '酸化銅(II)と炭素の混合物を加熱すると、銅と二酸化炭素が生じます。', '2CuO + C -> 2Cu + CO2', 'Oが2個のCO₂をつくるので、CuOは2が必要です。', ['CO', 'Cu2O']],
+        ['溶鉱炉での鉄の還元', '酸化鉄(III)を一酸化炭素で還元すると、鉄と二酸化炭素が生じます。', 'Fe2O3 + 3CO -> 2Fe + 3CO2', 'Feが2個でFeを2に。Oが3個なので、COを3、CO₂を3にします。', ['FeO', 'Fe3O4']],
+        ['マグネシウムと二酸化炭素', '燃焼中のマグネシウムを二酸化炭素中に入れると、酸化マグネシウムと炭素が生じます。', '2Mg + CO2 -> 2MgO + C', 'Mgは二酸化炭素からも酸素を奪うほど強い還元剤です。', ['MgCO3', 'CO']],
+        ['炭酸ナトリウムと塩酸', '炭酸ナトリウムに塩酸を加えると、塩化ナトリウム・水・二酸化炭素が生じます。', 'Na2CO3 + 2HCl -> 2NaCl + H2O + CO2', 'Naが2個なのでNaClを2に。Clは4個ではなく2個、HClは2になります。', ['NaHCO3', 'Cl2']],
+        ['アンモニアソーダ法（炭酸水素ナトリウムの生成）', '食塩水にアンモニアと二酸化炭素を通じると、炭酸水素ナトリウムの沈殿と塩化アンモニウムが生じます。', 'NaCl + NH3 + H2O + CO2 -> NaHCO3 + NH4Cl', 'ソルベー法の中心となる反応で、溶解度の小さいNaHCO₃が沈殿します。係数はすべて1です。', ['Na2CO3', 'NaOH', 'CaCl2']],
+        ['炭酸水素ナトリウムの熱分解', '炭酸水素ナトリウムを加熱すると、炭酸ナトリウム・水・二酸化炭素が生じます。', '2NaHCO3 -> Na2CO3 + H2O + CO2', 'Naが右辺に2個なのでNaHCO₃を2にします。', ['NaOH', 'CaCO3']]
+      ],
+      // [タイトル, 問題文, 反応式, 解説]
+      advanced: [
+        ['アンモニアソーダ法（石灰石の熱分解）', '石灰石（主成分: 炭酸カルシウム）を強熱し、生石灰と二酸化炭素を得る反応式を作りなさい。', 'CaCO3 -> CaO + CO2', '炭酸カルシウムを強熱すると、生石灰(CaO)と二酸化炭素に分解します。'],
+        ['オストワルト法（第1段階）', '白金触媒のもとでアンモニアを酸素と反応させ、一酸化窒素と水を生成する反応式を作りなさい。', '4NH3 + 5O2 -> 4NO + 6H2O', '4NH₃ + 5O₂ → 4NO + 6H₂O。Hの最小公倍数6を使い、全体を整数にします。'],
+        ['オストワルト法（第2段階）', '一酸化窒素を空気中の酸素で酸化し、二酸化窒素を生成する反応式を作りなさい。', '2NO + O2 -> 2NO2', 'O₂のOが2個なので、NO₂を2、NOも2にします。'],
+        ['オストワルト法（第3段階）', '二酸化窒素を温水に吸収させ、硝酸と一酸化窒素を生成する反応式を作りなさい。', '3NO2 + H2O -> 2HNO3 + NO', 'NO₂は一部が酸化されてHNO₃に、一部が還元されてNOになります。'],
+        ['テルミット反応', '酸化鉄(III)とアルミニウムの混合物に点火し、鉄と酸化アルミニウムを生成する反応式を作りなさい。', 'Fe2O3 + 2Al -> 2Fe + Al2O3', 'Alの強い還元力でFe₂O₃から鉄を遊離させる発熱反応です。レールの溶接に使われます。'],
+        ['ハーバー・ボッシュ法', '鉄を主成分とする触媒を用いて、窒素と水素からアンモニアを合成する反応式を作りなさい。', 'N2 + 3H2 -> 2NH3', 'Nが2個なのでNH₃を2に。Hが6個になるのでH₂を3にします。'],
+        ['接触法（SO₂の酸化）', '酸化バナジウム(V)を触媒として、二酸化硫黄を酸素で酸化し三酸化硫黄にする反応式を作りなさい。', '2SO2 + O2 -> 2SO3', '硫酸製造の中心となる可逆反応です。'],
+        ['接触法（硫酸の生成）', '三酸化硫黄を水と反応させ、硫酸を生成する反応式を作りなさい。', 'SO3 + H2O -> H2SO4', '実際の工業では濃硫酸に吸収させて発煙硫酸とし、希釈して濃硫酸を得ます。'],
+        ['アンモニアソーダ法（消石灰の生成）', '生石灰に水を加え、消石灰（水酸化カルシウム）を得る反応式を作りなさい。', 'CaO + H2O -> Ca(OH)2', '大量の熱を発生する反応です。'],
+        ['アンモニアソーダ法（NaHCO₃の沈殿）', '飽和食塩水にアンモニアと二酸化炭素を通じ、炭酸水素ナトリウムと塩化アンモニウムを得る反応式を作りなさい。', 'NaCl + NH3 + H2O + CO2 -> NaHCO3 + NH4Cl', '溶解度の小さいNaHCO₃が沈殿します。左辺は4つの物質です。'],
+        ['アンモニアソーダ法（炭酸ナトリウムの生成）', '炭酸水素ナトリウムを加熱し、炭酸ナトリウム・水・二酸化炭素を得る反応式を作りなさい。', '2NaHCO3 -> Na2CO3 + H2O + CO2', 'Naが右辺に2個なのでNaHCO₃を2にします。'],
+        ['アンモニアソーダ法（アンモニアの回収）', '塩化アンモニウムと消石灰を反応させ、塩化カルシウム・アンモニア・水を得る反応式を作りなさい。', '2NH4Cl + Ca(OH)2 -> CaCl2 + 2NH3 + 2H2O', 'Clが右辺に2個なのでNH₄Clを2に。アンモニアは再利用されます。'],
+        ['イオン交換膜法', '食塩水を電気分解し、水酸化ナトリウム・塩素・水素を得る反応式を作りなさい。', '2NaCl + 2H2O -> 2NaOH + Cl2 + H2', '陽極でCl₂、陰極でH₂とOH⁻が生じ、陰極側にNaOHができます。'],
+        ['ホール・エルー法', '融解した氷晶石に溶かした酸化アルミニウムを電気分解し、アルミニウムと酸素を得る反応式を作りなさい（炭素電極との反応は考えない）。', '2Al2O3 -> 4Al + 3O2', 'Oが3個と2個の最小公倍数6を使います。'],
+        ['溶鉱炉（鉄鉱石の還元）', '溶鉱炉内で、酸化鉄(III)が一酸化炭素により還元されて鉄と二酸化炭素になる反応式を作りなさい。', 'Fe2O3 + 3CO -> 2Fe + 3CO2', 'Feが2個、COが3個、CO₂が3個で、Oがそろいます。'],
+        ['溶鉱炉（コークスの燃焼）', '溶鉱炉内で、コークス（炭素）が酸素により完全燃焼して二酸化炭素になる反応式を作りなさい。', 'C + O2 -> CO2', '発熱反応で、炉内の温度を保ちます。'],
+        ['溶鉱炉（一酸化炭素の生成）', '溶鉱炉内で、二酸化炭素が高温の炭素に還元されて一酸化炭素になる反応式を作りなさい。', 'CO2 + C -> 2CO', 'Oが2個なのでCOを2にし、Cを1にします。'],
+        ['カーバイドからのアセチレン', '炭化カルシウム（カーバイド）に水を加え、水酸化カルシウムとアセチレン(C₂H₂)を得る反応式を作りなさい。', 'CaC2 + 2H2O -> Ca(OH)2 + C2H2', 'Hの数から、水は2になります。'],
+        ['カーバイドの製造', '電気炉で酸化カルシウムとコークス（炭素）を強熱し、炭化カルシウムと一酸化炭素を得る反応式を作りなさい。', 'CaO + 3C -> CaC2 + CO', 'Cが右辺で3個（CaC₂に2個、COに1個）になるので、Cを3にします。'],
+        ['銅の製錬（自己還元）', '硫化銅(I)を空気中で加熱し、銅と二酸化硫黄を得る反応式を作りなさい。', 'Cu2S + O2 -> 2Cu + SO2', '粗銅を得る自己還元反応です。'],
+        ['黄鉄鉱の焙焼', '黄鉄鉱(FeS₂)を空気中で焙焼し、酸化鉄(III)と二酸化硫黄を得る反応式を作りなさい。', '4FeS2 + 11O2 -> 2Fe2O3 + 8SO2', 'Fe₂O₃のFeが2個なのでFeS₂は4、SO₂は8、Oは計22個なのでO₂を11にします。'],
+        ['水蒸気改質', 'メタンと水蒸気から、一酸化炭素と水素を得る反応式を作りなさい。', 'CH4 + H2O -> CO + 3H2', 'Hが左辺で6個になるのでH₂を3にします。水素の工業的製法です。'],
+        ['水性ガスシフト反応', '一酸化炭素と水蒸気から、二酸化炭素と水素を得る反応式を作りなさい。', 'CO + H2O -> CO2 + H2', 'すべての係数が1になります。'],
+        ['メタノールの合成', '触媒を用いて、一酸化炭素と水素からメタノール(CH₃OH)を合成する反応式を作りなさい。', 'CO + 2H2 -> CH3OH', 'Hが4個になるのでH₂を2にします。'],
+        ['尿素の合成', 'アンモニアと二酸化炭素から、尿素 CO(NH2)2 と水を合成する反応式を作りなさい。', '2NH3 + CO2 -> CO(NH2)2 + H2O', 'Nが2個なのでNH₃を2に。H・Oも合います。'],
+        ['ケイ素の製造', '二酸化ケイ素をコークス（炭素）で還元し、ケイ素と一酸化炭素を得る反応式を作りなさい。', 'SiO2 + 2C -> Si + 2CO', 'Oが2個なのでCOを2に、Cも2にします。'],
+        ['ガラスの製造', '炭酸ナトリウムと二酸化ケイ素を高温で反応させ、ケイ酸ナトリウム(Na₂SiO₃)と二酸化炭素を得る反応式を作りなさい。', 'Na2CO3 + SiO2 -> Na2SiO3 + CO2', 'すべての係数が1になります。ソーダ石灰ガラスの原料の反応です。'],
+        ['過リン酸石灰の製造', 'リン酸カルシウムに濃硫酸を作用させ、リン酸二水素カルシウム Ca(H2PO4)2 と硫酸カルシウムを得る反応式を作りなさい。', 'Ca3(PO4)2 + 2H2SO4 -> Ca(H2PO4)2 + 2CaSO4', 'Caは左辺3個なので、右辺はCa(H₂PO₄)₂が1、CaSO₄が2。Sは2個なのでH₂SO₄を2にします。'],
+        ['エタノールの発酵', 'グルコースがアルコール発酵し、エタノール(C₂H₅OH)と二酸化炭素になる反応式を作りなさい。', 'C6H12O6 -> 2C2H5OH + 2CO2', 'Cが6個なので、エタノールを2、CO₂を2にするとすべて合います。'],
+        ['酸化エチレンの製造', '銀触媒を用いて、エチレンを酸素で酸化し、酸化エチレン(C₂H₄O)を得る反応式を作りなさい。', '2C2H4 + O2 -> 2C2H4O', 'O₂のOが2個なので、C₂H₄Oを2に。すると、C₂H₄も2になります。']
+      ]
+    };
+
+    // 反応式の文字列を {left, right} に変換
+    const parseSide = (s) => s.split(' + ').map(t => {
+      const m = t.trim().match(/^(\d*)(.+)$/);
+      return { coeff: m[1] ? parseInt(m[1], 10) : 1, formula: m[2] };
+    });
+    const buildEq = (eq) => {
+      const [l, r] = eq.split('->');
+      return { left: parseSide(l), right: parseSide(r) };
+    };
+    const shuf = (a) => [...a].sort(() => Math.random() - 0.5);
+
+    const baseQuizData = {
+      beginner: RAW.beginner.map(([title, eq, explanation], i) => ({
+        id: 'b' + (i + 1),
+        title,
+        text: `【${title}】両辺の原子の数が等しくなるように係数を合わせましょう。`,
+        ...buildEq(eq),
+        explanation
+      })),
+      intermediate: RAW.intermediate.map(([title, desc, eq, explanation, extra], i) => {
+        const e = buildEq(eq);
+        const names = Array.from(new Set([...e.left, ...e.right].map(t => t.formula).concat(extra)));
+        return {
+          id: 'i' + (i + 1),
+          title,
+          text: desc + '正しい化学式と係数を選択して反応式を完成させましょう。',
+          ...e,
+          choices: shuf(names),
+          explanation
+        };
+      }),
+      advanced: RAW.advanced.map(([title, text, eq, explanation], i) => ({
+        id: 'a' + (i + 1),
+        title,
+        text,
+        ...buildEq(eq),
+        explanation
+      }))
+    };
+
+    // --- ヘルパー関数 ---
+    const toHalf = (str) => {
+      if (!str) return "";
+      return str
+        .replace(/[Ａ-Ｚａ-ｚ０-９]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+        .replace(/（/g, '(').replace(/）/g, ')')
+        .replace(/\s+/g, '');
+    };
+
+    const fmtForm = (text) => {
+      if (!text) return "";
+      return text.split(/(\d+)/).map((part, i) =>
+        /^\d+$/.test(part) ? <sub key={i} className="text-[0.75em]">{part}</sub> : part
+      );
+    };
+
+    // 化学式の原子数を数える（括弧対応）
+    const countAtoms = (formula) => {
+      const stack = [{}];
+      const re = /([A-Z][a-z]?)(\d*)|(\()|(\))(\d*)/g;
+      let m;
+      let consumed = 0;
+      while ((m = re.exec(formula)) !== null) {
+        consumed += m[0].length;
+        if (m[1]) {
+          const top = stack[stack.length - 1];
+          top[m[1]] = (top[m[1]] || 0) + (m[2] ? parseInt(m[2], 10) : 1);
+        } else if (m[3]) {
+          stack.push({});
+        } else if (m[4]) {
+          if (stack.length < 2) return null;
+          const grp = stack.pop();
+          const mul = m[5] ? parseInt(m[5], 10) : 1;
+          const top = stack[stack.length - 1];
+          for (const k in grp) top[k] = (top[k] || 0) + grp[k] * mul;
+        }
+      }
+      if (consumed !== formula.length || stack.length !== 1) return null;
+      return stack[0];
+    };
+
+    // 反応式の原子数が両辺で一致するか（AI生成問題の検証用）
+    const isBalanced = (left, right) => {
+      const sum = (terms) => {
+        const total = {};
+        for (const t of terms) {
+          const atoms = countAtoms(toHalf(String(t.formula)));
+          const c = Number(t.coeff);
+          if (!atoms || !Number.isInteger(c) || c < 1) return null;
+          for (const k in atoms) total[k] = (total[k] || 0) + atoms[k] * c;
+        }
+        return total;
+      };
+      const l = sum(left), r = sum(right);
+      if (!l || !r) return false;
+      const keys = new Set([...Object.keys(l), ...Object.keys(r)]);
+      for (const k of keys) if ((l[k] || 0) !== (r[k] || 0)) return false;
+      return true;
+    };
+
+    const sanitizeAiQuestions = (arr, diff) => {
+      if (!Array.isArray(arr)) return [];
+      return arr.map((q, i) => {
+        if (!q || !Array.isArray(q.left) || !Array.isArray(q.right)) return null;
+        if (q.left.length < 1 || q.right.length < 1 || q.left.length > 4 || q.right.length > 4) return null;
+        const norm = (terms) => terms.map(t => ({ formula: toHalf(String(t.formula)), coeff: Number(t.coeff) }));
+        const left = norm(q.left), right = norm(q.right);
+        if (!isBalanced(left, right)) return null;
+        const out = {
+          id: `ai${i}`,
+          title: q.title || 'AI生成問題',
+          text: String(q.text || ''),
+          left, right,
+          explanation: String(q.explanation || '')
+        };
+        if (diff === 'intermediate') {
+          const all = [...left, ...right].map(t => t.formula);
+          const extra = Array.isArray(q.choices) ? q.choices.map(c => toHalf(String(c))) : [];
+          out.choices = Array.from(new Set([...all, ...extra])).sort(() => Math.random() - 0.5);
+        }
+        return out;
+      }).filter(Boolean);
+    };
+
+    // AI生成問題を、問題データ（RAW）と同じ書式の文字列にする
+    const buildExport = (qs, diff) => {
+      const side = (ts) => ts.map(t => (t.coeff > 1 ? t.coeff : '') + t.formula).join(' + ');
+      const esc = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\s*\n\s*/g, ' ');
+      return qs.map(q => {
+        const eq = `${side(q.left)} -> ${side(q.right)}`;
+        if (diff === 'intermediate') {
+          const used = new Set([...q.left, ...q.right].map(t => t.formula));
+          const extra = (q.choices || []).filter(c => !used.has(c)).map(c => `'${esc(c)}'`).join(', ');
+          return `['${esc(q.title)}', '${esc(q.text)}', '${esc(eq)}', '${esc(q.explanation)}', [${extra}]],`;
+        }
+        if (diff === 'advanced') return `['${esc(q.title)}', '${esc(q.text)}', '${esc(eq)}', '${esc(q.explanation)}'],`;
+        return `['${esc(q.title)}', '${esc(eq)}', '${esc(q.explanation)}'],`;
+      }).join('\n');
+    };
+
+    const renderEq = (leftTerms, rightTerms) => {
+      const renderSide = (terms) =>
+        terms.map((t, idx) => (
+          <Fragment key={idx}>
+            {idx > 0 && <span className="mx-1.5 text-slate-400 font-bold">+</span>}
+            <span className="text-slate-800 font-bold">
+              {t.coeff > 1 ? t.coeff : ''}
+              {fmtForm(t.formula)}
+            </span>
+          </Fragment>
+        ));
+
+      return (
+        <div className="flex items-center justify-center flex-wrap text-lg sm:text-xl">
+          {renderSide(leftTerms)}
+          <i className="fa-solid fa-arrow-right mx-3 text-teal-600"></i>
+          {renderSide(rightTerms)}
+        </div>
+      );
+    };
+
+    // --- 各項の入力ボックス ---
+    const TermInput = ({ coeff, formula, onCoeffChange, onFormulaChange, difficulty, choices, disabled }) => {
+      const isBeginner = difficulty === 'beginner';
+      const isAdvanced = difficulty === 'advanced';
+
+      return (
+        <div className="flex flex-col items-center bg-white p-2.5 rounded-xl shadow-sm border border-slate-200 min-w-[85px]">
+          <div className="text-[10px] text-slate-400 mb-1 font-bold">
+            {isBeginner ? '係数' : '係数 / 化学式'}
+          </div>
+          <div className="flex items-center space-x-1">
+            <input
+              type="number" min="1" max="99" disabled={disabled}
+              className="w-11 h-10 text-center text-base font-bold border-2 border-slate-300 rounded-lg focus:border-teal-500 outline-none disabled:bg-slate-100"
+              placeholder="係" value={coeff}
+              onChange={(e) => onCoeffChange(e.target.value)}
+            />
+            {isBeginner ? (
+              <div className="text-lg font-bold px-1.5 text-slate-700 min-w-[2.5rem] text-center">
+                {fmtForm(formula)}
+              </div>
+            ) : !isAdvanced && choices ? (
+              <select
+                disabled={disabled}
+                className="h-10 text-sm font-bold border-2 border-slate-300 rounded-lg focus:border-teal-500 outline-none px-1 bg-white disabled:bg-slate-100"
+                value={formula} onChange={(e) => onFormulaChange(e.target.value)}
+              >
+                <option value="">選択</option>
+                {choices.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            ) : (
+              <input
+                type="text" disabled={disabled}
+                className="w-20 h-10 text-center text-base font-bold border-2 border-slate-300 rounded-lg focus:border-teal-500 outline-none disabled:bg-slate-100 placeholder:text-xs"
+                placeholder="例:H2O" value={formula}
+                onChange={(e) => onFormulaChange(e.target.value)}
+                autoCapitalize="off" autoComplete="off" spellCheck="false"
+              />
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    // --- メインアプリ ---
+    const App = () => {
+      const [screen, setScreen] = useState('home');
+      const [difficulty, setDifficulty] = useState('beginner');
+      const [questions, setQuestions] = useState([]);
+      const [currentIndex, setCurrentIndex] = useState(0);
+      const [score, setScore] = useState(0);
+      const [hasAttempted, setHasAttempted] = useState(false);
+      const [isLoading, setIsLoading] = useState(false);
+      const [apiKey, setApiKey] = useState(loadKey());
+      const [aiError, setAiError] = useState('');
+
+      const [inputs, setInputs] = useState({ left: [], right: [] });
+      const [resultData, setResultData] = useState({ shown: false, isCorrect: false, errorMsg: '' });
+
+      const startQuiz = (diff) => {
+        setDifficulty(diff);
+        const shuffled = [...baseQuizData[diff]].sort(() => Math.random() - 0.5).slice(0, QUIZ_LEN);
+        setQuestions(shuffled);
+        setCurrentIndex(0);
+        setScore(0);
+        setScreen('playing');
+      };
+
+      const updateKey = (v) => { setApiKey(v); saveKey(v.trim()); };
+
+      const generateAI = async (diff) => {
+        const key = apiKey.trim();
+        if (!key) {
+          setAiError('AI新問を使うには、下の欄にGemini APIキーを入力してください。');
+          return;
+        }
+        setAiError('');
+        setIsLoading(true);
+
+        const diffLabel = { beginner: '初級（係数合わせのみ）', intermediate: '中級（係数＋化学式の選択）', advanced: '上級（工業的製法の反応式を自分で立式）' }[diff];
+        const prompt = `高校工業化学の化学反応式問題を3問作成してください。
+次のJSON配列のみを出力してください（マークダウン・コメント不要）。
+各反応式は必ず原子数が両辺で一致し、係数は最小の整数比にすること。化学式は H2O, Ca(OH)2 のように半角英数字で書くこと。左辺・右辺とも物質は最大3つまで。
+[
+  {
+    "title": "タイトル",
+    "text": "問題文",
+    "left": [{"formula": "化学式", "coeff": 1}],
+    "right": [{"formula": "化学式", "coeff": 1}],
+    "choices": ["化学式1", "化学式2"],
+    "explanation": "解説"
+  }
+]
+"choices" は中級のときのみ含め、正解の化学式とダミーの化学式を混ぜること。
+難易度: ${diffLabel}`;
+
+        let lastErr = '';
+        for (const model of GEMINI_MODELS) {
+          try {
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: { responseMimeType: 'application/json' }
+              })
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              lastErr = `${model}: ${data?.error?.message || res.status}`;
+              continue;
+            }
+            const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            const match = text.match(/\[[\s\S]*\]/);
+            if (!match) { lastErr = `${model}: 応答がJSON配列ではありません`; continue; }
+            const qs = sanitizeAiQuestions(JSON.parse(match[0]), diff);
+            if (qs.length === 0) { lastErr = `${model}: 有効な問題がありませんでした`; continue; }
+            setDifficulty(diff);
+            setQuestions(qs);
+            setCurrentIndex(0);
+            setScore(0);
+            setIsLoading(false);
+            setScreen('playing');
+            return;
+          } catch (e) {
+            lastErr = `${model}: ${e.message}`;
+          }
+        }
+        setIsLoading(false);
+        setAiError(`AI生成に失敗しました（${lastErr}）。通常問題で練習できます。`);
+      };
+
+      useEffect(() => {
+        if (screen === 'playing' && questions.length > 0) {
+          const current = questions[currentIndex];
+          if (!current) return;
+          setResultData({ shown: false, isCorrect: false, errorMsg: '' });
+          setHasAttempted(false);
+
+          if (difficulty === 'beginner') {
+            setInputs({
+              left: current.left.map(t => ({ coeff: '', formula: t.formula })),
+              right: current.right.map(t => ({ coeff: '', formula: t.formula }))
+            });
+          } else if (difficulty === 'intermediate') {
+            setInputs({
+              left: current.left.map(() => ({ coeff: '', formula: '' })),
+              right: current.right.map(() => ({ coeff: '', formula: '' }))
+            });
+          } else {
+            setInputs({
+              left: Array.from({ length: Math.max(3, current.left.length) }, () => ({ coeff: '', formula: '' })),
+              right: Array.from({ length: Math.max(3, current.right.length) }, () => ({ coeff: '', formula: '' }))
+            });
+          }
+        }
+      }, [screen, currentIndex, questions]);
+
+      const handleInput = (side, index, field, value) => {
+        setInputs(prev => {
+          const newSide = [...prev[side]];
+          newSide[index] = { ...newSide[index], [field]: value };
+          return { ...prev, [side]: newSide };
+        });
+      };
+
+      const check = () => {
+        const current = questions[currentIndex];
+
+        if (difficulty !== 'advanced') {
+          const lOk = inputs.left.every(t => String(t.coeff).trim() !== '' && t.formula.trim() !== '');
+          const rOk = inputs.right.every(t => String(t.coeff).trim() !== '' && t.formula.trim() !== '');
+          if (!lOk || !rOk) {
+            setResultData({ shown: false, isCorrect: false, errorMsg: 'すべての空欄を埋めてください（係数1も「1」を入力）。' });
+            return;
+          }
+        } else {
+          const hasPart = [...inputs.left, ...inputs.right].some(
+            t => (String(t.coeff).trim() !== '' && t.formula.trim() === '') || (String(t.coeff).trim() === '' && t.formula.trim() !== '')
+          );
+          if (hasPart) {
+            setResultData({ shown: false, isCorrect: false, errorMsg: '係数と化学式の片方しか入力されていない枠があります。' });
+            return;
+          }
+        }
+
+        const parse = (terms) => {
+          return terms
+            .filter(t => String(t.coeff).trim() !== '' && t.formula.trim() !== '')
+            .map(t => ({
+              coeff: parseInt(toHalf(String(t.coeff)), 10),
+              formula: toHalf(t.formula.trim())
+            }))
+            .sort((a, b) => a.formula.localeCompare(b.formula));
+        };
+
+        const eq = (a, b) => {
+          if (a.length !== b.length) return false;
+          return a.every((item, i) => item.coeff === b[i].coeff && item.formula.toUpperCase() === b[i].formula.toUpperCase());
+        };
+
+        const isCorrect = eq(parse(inputs.left), parse(current.left)) && eq(parse(inputs.right), parse(current.right));
+
+        setResultData({ shown: true, isCorrect, errorMsg: '' });
+        if (isCorrect && !hasAttempted) setScore(s => s + 1);
+        setHasAttempted(true);
+      };
+
+      // --- 画面レンダリング ---
+      if (screen === 'home') {
+        return (
+          <div className="flex-grow flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-xl p-6 sm:p-8 max-w-md w-full text-center border-t-8 border-teal-500">
+              <div className="text-teal-500 text-5xl mb-3"><i className="fa-solid fa-flask"></i></div>
+              <h1 className="text-2xl font-black text-slate-800 mb-2">工業化学 反応式マスター</h1>
+              <p className="text-slate-600 text-sm mb-6">化学反応式をマスターして工業化学の基礎固めをしよう！</p>
+
+              {isLoading ? (
+                <div className="py-10 text-teal-600 font-bold animate-pulse">
+                  <i className="fa-solid fa-spinner fa-spin mr-2"></i>AIが問題を作成中...
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="p-3 bg-emerald-50 border-2 border-emerald-500 rounded-xl text-left">
+                    <div className="text-emerald-700 font-bold">初級 (係数合わせ)</div>
+                    <div className="flex gap-2 mt-2">
+                      <button onClick={() => startQuiz('beginner')} className="flex-1 py-1.5 bg-emerald-600 text-white font-bold rounded-lg text-sm">練習</button>
+                      <button onClick={() => generateAI('beginner')} className="flex-1 py-1.5 bg-white text-emerald-700 border border-emerald-600 font-bold rounded-lg text-sm">✨AI新問</button>
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-blue-50 border-2 border-blue-500 rounded-xl text-left">
+                    <div className="text-blue-700 font-bold">中級 (係数＋化学式選択)</div>
+                    <div className="flex gap-2 mt-2">
+                      <button onClick={() => startQuiz('intermediate')} className="flex-1 py-1.5 bg-blue-600 text-white font-bold rounded-lg text-sm">練習</button>
+                      <button onClick={() => generateAI('intermediate')} className="flex-1 py-1.5 bg-white text-blue-700 border border-blue-600 font-bold rounded-lg text-sm">✨AI新問</button>
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-purple-50 border-2 border-purple-500 rounded-xl text-left">
+                    <div className="text-purple-700 font-bold">上級 (工業的反応の立式)</div>
+                    <div className="flex gap-2 mt-2">
+                      <button onClick={() => startQuiz('advanced')} className="flex-1 py-1.5 bg-purple-600 text-white font-bold rounded-lg text-sm">練習</button>
+                      <button onClick={() => generateAI('advanced')} className="flex-1 py-1.5 bg-white text-purple-700 border border-purple-600 font-bold rounded-lg text-sm">✨AI新問</button>
+                    </div>
+                  </div>
+
+                  {aiError && (
+                    <div className="text-left text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded-lg p-2">
+                      <i className="fa-solid fa-triangle-exclamation mr-1"></i>{aiError}
+                    </div>
+                  )}
+
+                  <details className="text-left text-xs text-slate-500 pt-1">
+                    <summary className="cursor-pointer font-bold">AI新問の設定（Gemini APIキー）</summary>
+                    <input
+                      type="password"
+                      className="mt-2 w-full border-2 border-slate-300 rounded-lg px-2 py-1.5 text-sm focus:border-teal-500 outline-none"
+                      placeholder="APIキーを貼り付け"
+                      value={apiKey}
+                      onChange={(e) => updateKey(e.target.value)}
+                      autoComplete="off"
+                    />
+                    <p className="mt-1">キーはこのブラウザ内にだけ保存されます。「練習」ボタンはキー無しで使えます。</p>
+                  </details>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      if (screen === 'result') {
+        return (
+          <div className="flex-grow flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-xl p-8 max-w-sm w-full text-center border-t-8 border-teal-500">
+              <div className="text-yellow-500 text-5xl mb-3"><i className="fa-solid fa-trophy"></i></div>
+              <h2 className="text-xl font-bold mb-2">結果発表</h2>
+              <div className="text-4xl font-black mb-4">{score} / {questions.length}</div>
+              {questions[0] && String(questions[0].id).startsWith('ai') && (
+                <details className="text-left text-xs text-slate-500 mb-4">
+                  <summary className="cursor-pointer font-bold">このAI問題を保存用にコピー</summary>
+                  <p className="mt-2">下の文章をコピーして、Claudeに貼り付けるか、問題データに追加してください。この画面を閉じるとAI問題は消えます。</p>
+                  <textarea
+                    readOnly
+                    className="mt-2 w-full h-40 border-2 border-slate-300 rounded-lg p-2 text-xs font-mono"
+                    value={buildExport(questions, difficulty)}
+                    onFocus={(e) => e.target.select()}
+                  />
+                </details>
+              )}
+              <button onClick={() => setScreen('home')} className="w-full py-3 bg-teal-600 text-white font-bold rounded-xl shadow">ホームへ戻る</button>
+            </div>
+          </div>
+        );
+      }
+
+      const current = questions[currentIndex];
+      if (!current) return null;
+
+      return (
+        <div className="flex-grow flex flex-col max-w-3xl w-full mx-auto p-4">
+          <div className="flex justify-between items-center mb-4">
+            <button onClick={() => setScreen('home')} className="bg-white px-3 py-1.5 rounded-lg shadow-sm border text-sm font-bold">
+              <i className="fa-solid fa-house mr-1"></i>ホーム
+            </button>
+            <div className="text-teal-700 font-bold bg-teal-100 px-3 py-1 rounded-lg text-sm">スコア: {score}</div>
+          </div>
+
+          <div className="bg-white rounded-2xl shadow-md p-5 mb-5 border-l-4 border-teal-500">
+            <div className="text-xs font-bold text-teal-600 mb-1">Q {currentIndex + 1} / {questions.length}</div>
+            {current.title && <h3 className="font-bold text-base sm:text-lg text-slate-800 mb-2">{current.title}</h3>}
+            <p className="text-slate-700 text-sm sm:text-base leading-relaxed">{current.text}</p>
+            {difficulty === 'intermediate' && (
+              <div className="mt-3 text-sm bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-blue-800">
+                <span className="font-bold mr-2">ヒント（関係する物質）</span>
+                {Array.from(new Set([...current.left, ...current.right].map(t => t.formula))).sort().map(f => (
+                  <span key={f} className="inline-block mr-3 font-bold text-base">{fmtForm(f)}</span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-slate-50 rounded-2xl shadow-inner border p-4 mb-5 overflow-x-auto">
+            <div className="flex items-center justify-center gap-2 min-w-max mx-auto">
+              <div className="flex items-center gap-2 bg-white/70 p-2 rounded-xl border">
+                {inputs.left.map((t, i) => (
+                  <Fragment key={`l-${i}`}>
+                    {i > 0 && <span className="font-black text-slate-400">+</span>}
+                    <TermInput coeff={t.coeff} formula={t.formula} onCoeffChange={v => handleInput('left', i, 'coeff', v)} onFormulaChange={v => handleInput('left', i, 'formula', v)} difficulty={difficulty} choices={current.choices} disabled={resultData.shown} />
+                  </Fragment>
+                ))}
+              </div>
+
+              <div className="text-2xl font-black text-teal-500 mx-2"><i className="fa-solid fa-arrow-right"></i></div>
+
+              <div className="flex items-center gap-2 bg-white/70 p-2 rounded-xl border">
+                {inputs.right.map((t, i) => (
+                  <Fragment key={`r-${i}`}>
+                    {i > 0 && <span className="font-black text-slate-400">+</span>}
+                    <TermInput coeff={t.coeff} formula={t.formula} onCoeffChange={v => handleInput('right', i, 'coeff', v)} onFormulaChange={v => handleInput('right', i, 'formula', v)} difficulty={difficulty} choices={current.choices} disabled={resultData.shown} />
+                  </Fragment>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {resultData.errorMsg && (
+            <div className="mb-4 text-center text-rose-600 font-bold bg-rose-50 p-3 rounded-xl border border-rose-200 text-sm">
+              <i className="fa-solid fa-triangle-exclamation mr-1"></i>{resultData.errorMsg}
+            </div>
+          )}
+
+          {!resultData.shown ? (
+            <button onClick={check} className="w-full py-3.5 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl shadow-lg">判定する</button>
+          ) : (
+            <div className={`rounded-2xl p-5 border-2 ${resultData.isCorrect ? 'bg-emerald-50 border-emerald-500' : 'bg-rose-50 border-rose-500'}`}>
+              <h3 className={`text-lg font-bold mb-2 ${resultData.isCorrect ? 'text-emerald-700' : 'text-rose-700'}`}>
+                {resultData.isCorrect ? '🎉 正解！' : '❌ 不正解'}
+              </h3>
+              <p className="text-sm text-slate-700 mb-4">{current.explanation}</p>
+              <div className="bg-white p-3 rounded-xl border mb-4 text-center">
+                <div className="text-xs text-slate-400 mb-1 font-bold">【正しい化学反応式】</div>
+                {renderEq(current.left, current.right)}
+              </div>
+              <div className="flex gap-2">
+                {!resultData.isCorrect && (
+                  <button onClick={() => setResultData({ shown: false, isCorrect: false, errorMsg: '' })} className="flex-1 py-2.5 bg-white border border-rose-400 text-rose-600 font-bold rounded-xl">やり直す</button>
+                )}
+                <button onClick={() => currentIndex + 1 < questions.length ? setCurrentIndex(i => i + 1) : setScreen('result')} className="flex-1 py-2.5 bg-teal-600 text-white font-bold rounded-xl">
+                  {currentIndex + 1 < questions.length ? '次の問題へ' : '結果を見る'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
